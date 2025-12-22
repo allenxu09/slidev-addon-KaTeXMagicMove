@@ -1,0 +1,30 @@
+{
+  "name": "slidev-addon-katexmagicmove",
+  "version": "1.0.0",
+  "description": "",
+  "files": [
+    "components/*"
+  ],
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=14.0.0",
+    "slidev": ">=0.48.1"
+  },
+  "peerDependencies": {
+    "vue": "^3.2.34",
+    "@slidev/client": "^0.48.0"
+  },
+  "devDependencies": {
+    "@slidev/cli": "^0.48.0",
+    "@slidev/theme-default": "latest",
+    "@vueuse/shared": "^8.5.0",
+    "generate-changelog": "^1.8.0",
+    "vue": "^3.2.34"
+  }
+}

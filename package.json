@@ -1,6 +1,6 @@
 {
   "name": "slidev-addon-katexmagicmove",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "",
   "files": [
     "components/*"
@@ -19,6 +19,9 @@
   "peerDependencies": {
     "vue": "^3.2.34",
     "@slidev/client": "^0.48.0"
+  },
+  "dependencies": {
+    "katex": "^0.16.27"
   },
   "devDependencies": {
     "@slidev/cli": "^0.48.0",

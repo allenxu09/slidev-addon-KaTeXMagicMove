@@ -1,12 +1,12 @@
 ---
-theme: seriph
+theme: default
 mdc: true
 transition: slide-left
 ---
 
 <script setup>
 import { ref } from 'vue'
-import KaTeXMagicMove from './components/KaTeXMagicMove.vue'
+import KaTeXMagicMove from '/components/KaTexMagicMove.vue'
 
 const equations = [
 	String.raw`\begin{pmatrix}

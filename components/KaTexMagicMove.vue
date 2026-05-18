@@ -10,21 +10,40 @@ const props = withDefaults(defineProps<{
   easing?: string
   displayMode?: boolean
   fontSize?: string
+  stagger?: number
 }>(), {
-  duration: 500,
-  easing: 'cubic-bezier(0.16, 1, 0.3, 1)',
+  duration: 650,
+  easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
   displayMode: true,
   fontSize: '1.6rem',
+  stagger: 8,
 })
 
 const emit = defineEmits<{
   (e: 'update:step', value: number): void
 }>()
 
+type Atom = {
+  el: HTMLElement
+  key: string
+  text: string
+  id: string
+  index: number
+}
+
+type AtomMatch = {
+  prevIndex: number
+  nextIndex: number
+}
+
 const internal = ref(0)
 const container = ref<HTMLElement | null>(null)
 const overlay = ref<HTMLElement | null>(null)
 const hasRendered = ref(false)
+
+let idSerial = 0
+let animationRun = 0
+const activeAnimations = new Set<Animation>()
 
 const currentStep = computed({
   get: () => (props.step ?? internal.value),
@@ -38,109 +57,159 @@ const currentStep = computed({
 const currentLatex = computed(() => props.steps[Math.min(props.steps.length - 1, Math.max(0, currentStep.value))] ?? '')
 
 const atomClasses = [
-  'mord', 'mop', 'mbin', 'mrel', 'mopen', 'mclose',
-  'mtext', 'mspace', 'msupsub', 'frac-line', 'sqrt-sign', 'sqrt-line',
+  'mord',
+  'mop',
+  'mbin',
+  'mrel',
+  'mopen',
+  'mclose',
+  'mpunct',
+  'minner',
+  'mtext',
+  'mspace',
+  'msupsub',
+  'frac-line',
+  'sqrt-sign',
+  'sqrt-line',
+  'overline-line',
+  'underline-line',
+  'accent-body',
 ]
+
 const atomSelector = atomClasses.map(c => `.katex-html .${c}`).join(', ')
 const leafSelector = atomClasses.map(c => `.${c}`).join(', ')
-
-const sigCounts = new Map<string, number>()
-
-type Atom = {
-  el: HTMLElement
-  sig: string
-  text: string
-  id: string
-}
 
 function normalizeText(text: string) {
   return text.replace(/\s+/g, ' ').trim()
 }
 
-function signature(el: HTMLElement) {
-  const tag = el.tagName.toLowerCase()
-  const cls = Array.from(el.classList)
-    .filter(c => !c.startsWith('katex'))
+function atomRole(el: HTMLElement) {
+  return atomClasses.find(c => el.classList.contains(c)) ?? el.tagName.toLowerCase()
+}
+
+function atomKey(el: HTMLElement) {
+  const role = atomRole(el)
+  const text = normalizeText(el.textContent || '')
+  const mathClass = Array.from(el.classList)
+    .filter(c => c !== role && !c.startsWith('katex'))
     .sort()
     .join('.')
-  const text = normalizeText(el.textContent || '')
-  return `${tag}|${cls}|${text}`
+
+  return `${role}|${mathClass}|${text}`
+}
+
+function isRenderableAtom(el: HTMLElement) {
+  const rect = el.getBoundingClientRect()
+  const hasVisibleBox = rect.width > 0.2 && rect.height > 0.2
+  const isStructuralLine = el.classList.contains('frac-line')
+    || el.classList.contains('sqrt-line')
+    || el.classList.contains('overline-line')
+    || el.classList.contains('underline-line')
+
+  return hasVisibleBox || isStructuralLine
 }
 
 function collectAtoms(root: HTMLElement): Atom[] {
   const all = Array.from(root.querySelectorAll<HTMLElement>(atomSelector))
-  const leafs = all.filter(el => !el.querySelector(leafSelector))
-  return leafs.map(el => ({
+  const leafs = all.filter(el => !el.querySelector(leafSelector) && isRenderableAtom(el))
+
+  return leafs.map((el, index) => ({
     el,
-    sig: signature(el),
+    key: atomKey(el),
     text: normalizeText(el.textContent || ''),
-    id: el.dataset.kid || '',
+    id: el.dataset.katexMoveId || '',
+    index,
   }))
 }
 
-function parseSuffix(id: string) {
-  const m = id.match(/#(\d+)$/)
-  return m ? Number(m[1]) : -1
+function nextId() {
+  return `km-${idSerial++}`
 }
 
-function matchAtoms(prev: Atom[], next: Atom[]) {
-  const prevMap = new Map<string, number[]>()
-  prev.forEach((atom, i) => {
-    if (!prevMap.has(atom.sig))
-      prevMap.set(atom.sig, [])
-    prevMap.get(atom.sig)!.push(i)
+function seedIdSerial(atoms: Atom[]) {
+  atoms.forEach((atom) => {
+    const match = atom.id.match(/^km-(\d+)$/)
+    if (match)
+      idSerial = Math.max(idSerial, Number(match[1]) + 1)
   })
+}
 
-  const pairs: Array<[number, number]> = []
-  next.forEach((atom, j) => {
-    const indices = prevMap.get(atom.sig)
-    if (indices && indices.length) {
-      const i = indices.shift()!
-      pairs.push([i, j])
-      console.log(`Matched atom ${atom.sig} (prev #${i} to next #${j})`)
+function ensureAtomIds(atoms: Atom[]) {
+  seedIdSerial(atoms)
+  atoms.forEach((atom) => {
+    if (!atom.id) {
+      atom.id = nextId()
+      atom.el.dataset.katexMoveId = atom.id
     }
   })
-  return pairs
 }
 
-function assignIds(prevAtoms: Atom[], host: HTMLElement) {
-  const nextAtoms = collectAtoms(host)
-
-  sigCounts.clear()
-  // Seed counts from previous IDs to keep numbering stable
-  prevAtoms.forEach((atom) => {
-    const n = parseSuffix(atom.id)
-    const prevMax = sigCounts.get(atom.sig) ?? 0
-    sigCounts.set(atom.sig, Math.max(prevMax, n + 1))
-  })
-
-  const pairs = matchAtoms(prevAtoms, nextAtoms)
-  const taken = new Set<string>()
-
-  pairs.forEach(([pi, ni]) => {
-    const id = prevAtoms[pi].id || `${prevAtoms[pi].sig}#${sigCounts.get(prevAtoms[pi].sig) ?? 0}`
-    nextAtoms[ni].el.dataset.kid = id
-    taken.add(id)
-  })
-
-  nextAtoms.forEach((atom) => {
-    if (atom.el.dataset.kid)
-      return
-    const count = sigCounts.get(atom.sig) ?? 0
-    const candidate = `${atom.sig}#${count}`
-    atom.el.dataset.kid = taken.has(candidate) ? `${atom.sig}#${count + 1}` : candidate
-    sigCounts.set(atom.sig, count + 1)
-  })
-
-  return nextAtoms
-}
-
-function measure(root: HTMLElement) {
+function measureAtoms(atoms: Atom[]) {
   const map = new Map<string, DOMRect>()
-  root.querySelectorAll<HTMLElement>('[data-kid]').forEach((el) => {
-    map.set(el.dataset.kid!, el.getBoundingClientRect())
+  atoms.forEach((atom) => {
+    if (atom.id)
+      map.set(atom.id, atom.el.getBoundingClientRect())
   })
   return map
+}
+
+function measureAtomList(atoms: Atom[]) {
+  return atoms.map(atom => atom.el.getBoundingClientRect())
+}
+
+function centerDistance(a: DOMRect, b: DOMRect) {
+  const ax = a.left + a.width / 2
+  const ay = a.top + a.height / 2
+  const bx = b.left + b.width / 2
+  const by = b.top + b.height / 2
+  return Math.hypot(ax - bx, ay - by)
+}
+
+function sizeDelta(a: DOMRect, b: DOMRect) {
+  return Math.abs(a.width - b.width) + Math.abs(a.height - b.height)
+}
+
+function matchAtoms(prevAtoms: Atom[], nextAtoms: Atom[], prevRects: Map<string, DOMRect>, nextRects: DOMRect[]) {
+  const candidates: Array<AtomMatch & { score: number }> = []
+
+  prevAtoms.forEach((prevAtom, prevIndex) => {
+    const prevRect = prevRects.get(prevAtom.id)
+    if (!prevRect)
+      return
+
+    nextAtoms.forEach((nextAtom, nextIndex) => {
+      if (prevAtom.key !== nextAtom.key)
+        return
+
+      const nextRect = nextRects[nextIndex]
+      const orderPenalty = Math.abs(prevAtom.index - nextAtom.index) * 1.5
+      const travelPenalty = centerDistance(prevRect, nextRect) * 0.55
+      const shapePenalty = sizeDelta(prevRect, nextRect) * 0.35
+
+      candidates.push({
+        prevIndex,
+        nextIndex,
+        score: orderPenalty + travelPenalty + shapePenalty,
+      })
+    })
+  })
+
+  candidates.sort((a, b) => a.score - b.score)
+
+  const usedPrev = new Set<number>()
+  const usedNext = new Set<number>()
+  const matches: AtomMatch[] = []
+
+  candidates.forEach((candidate) => {
+    if (usedPrev.has(candidate.prevIndex) || usedNext.has(candidate.nextIndex))
+      return
+
+    usedPrev.add(candidate.prevIndex)
+    usedNext.add(candidate.nextIndex)
+    matches.push(candidate)
+  })
+
+  return matches
 }
 
 function renderLatex(target: HTMLElement, latex: string) {
@@ -152,92 +221,226 @@ function renderLatex(target: HTMLElement, latex: string) {
   })
 }
 
-function animate(nextLatex: string) {
+function prefersReducedMotion() {
+  return typeof window !== 'undefined'
+    && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+}
+
+function trackAnimation(animation: Animation) {
+  activeAnimations.add(animation)
+
+  const cleanup = () => activeAnimations.delete(animation)
+  animation.addEventListener('finish', cleanup, { once: true })
+  animation.addEventListener('cancel', cleanup, { once: true })
+
+  return animation
+}
+
+function cancelAnimations() {
+  activeAnimations.forEach(animation => animation.cancel())
+  activeAnimations.clear()
+}
+
+function clearOverlay() {
+  if (overlay.value)
+    overlay.value.innerHTML = ''
+}
+
+function animateTransform(el: HTMLElement, keyframes: Keyframe[], delay = 0) {
+  el.style.willChange = 'transform, opacity, filter'
+  el.style.transformOrigin = 'top left'
+
+  const animation = el.animate(keyframes, {
+    duration: props.duration,
+    easing: props.easing,
+    delay,
+    fill: 'both',
+  })
+
+  trackAnimation(animation)
+  animation.finished
+    .then(() => {
+      el.style.willChange = ''
+      el.style.transformOrigin = ''
+    })
+    .catch(() => {})
+}
+
+function animateEnteringAtom(atom: Atom, index: number) {
+  const delay = Math.min(index * props.stagger, props.duration * 0.22)
+
+  animateTransform(atom.el, [
+    {
+      opacity: 0,
+      transform: 'translate3d(0, 0.16em, 0) scale(0.92)',
+      filter: 'blur(2px)',
+    },
+    {
+      opacity: 1,
+      transform: 'translate3d(0, 0, 0) scale(1)',
+      filter: 'blur(0)',
+    },
+  ], delay)
+}
+
+function animateMatchedAtom(atom: Atom, prevRect: DOMRect, nextRect: DOMRect, index: number) {
+  const dx = prevRect.left - nextRect.left
+  const dy = prevRect.top - nextRect.top
+  const sx = prevRect.width / Math.max(nextRect.width, 1)
+  const sy = prevRect.height / Math.max(nextRect.height, 1)
+  const distance = Math.hypot(dx, dy)
+  const delay = Math.min(index * props.stagger * 0.5, props.duration * 0.16)
+
+  animateTransform(atom.el, [
+    {
+      opacity: distance > 1 ? 0.92 : 1,
+      transform: `translate3d(${dx}px, ${dy}px, 0) scale(${sx}, ${sy})`,
+      filter: distance > 24 ? 'blur(0.4px)' : 'blur(0)',
+    },
+    {
+      opacity: 1,
+      transform: 'translate3d(0, 0, 0) scale(1)',
+      filter: 'blur(0)',
+    },
+  ], delay)
+}
+
+function animateLeavingAtom(id: string, prevSnapshot: HTMLElement, prevRect: DOMRect, overlayRect: DOMRect, index: number) {
+  if (!overlay.value)
+    return
+
+  const original = prevSnapshot.querySelector<HTMLElement>(`[data-katex-move-id="${id}"]`)
+  const clone = original?.cloneNode(true) as HTMLElement | null
+  if (!clone)
+    return
+
+  clone.removeAttribute('data-katex-move-id')
+  clone.style.position = 'absolute'
+  clone.style.left = `${prevRect.left - overlayRect.left}px`
+  clone.style.top = `${prevRect.top - overlayRect.top}px`
+  clone.style.width = `${prevRect.width}px`
+  clone.style.height = `${prevRect.height}px`
+  clone.style.margin = '0'
+  clone.style.display = 'inline-block'
+  clone.style.pointerEvents = 'none'
+  clone.style.transformOrigin = 'top left'
+  clone.style.willChange = 'transform, opacity, filter'
+
+  overlay.value.appendChild(clone)
+
+  const delay = Math.min(index * props.stagger * 0.4, props.duration * 0.12)
+  const animation = clone.animate([
+    {
+      opacity: 1,
+      transform: 'translate3d(0, 0, 0) scale(1)',
+      filter: 'blur(0)',
+    },
+    {
+      opacity: 0,
+      transform: 'translate3d(0, 0.22em, 0) scale(0.94)',
+      filter: 'blur(2px)',
+    },
+  ], {
+    duration: props.duration,
+    easing: props.easing,
+    delay,
+    fill: 'both',
+  })
+
+  trackAnimation(animation)
+  animation.finished
+    .then(() => clone.remove())
+    .catch(() => clone.remove())
+}
+
+async function animate(nextLatex: string) {
   const host = container.value
   if (!host)
     return
 
-  const prevRectMap = hasRendered.value ? measure(host) : new Map<string, DOMRect>()
-  const prevSnapshot = hasRendered.value ? host.cloneNode(true) as HTMLElement : null
+  const run = ++animationRun
   const prevAtoms = hasRendered.value ? collectAtoms(host) : []
-  const leavingNodes = new Set(prevRectMap.keys())
+  ensureAtomIds(prevAtoms)
 
-  // Render new
+  const prevRects = hasRendered.value ? measureAtoms(prevAtoms) : new Map<string, DOMRect>()
+  const prevSnapshot = hasRendered.value ? host.cloneNode(true) as HTMLElement : null
+  const leavingIds = new Set(prevRects.keys())
+
+  cancelAnimations()
+  clearOverlay()
   renderLatex(host, nextLatex)
-  const nextAtoms = assignIds(prevAtoms, host)
 
-  nextTick(() => {
-    const nextRectMap = measure(host)
-    const overlayRect = overlay.value?.getBoundingClientRect()
+  await nextTick()
+  if (run !== animationRun)
+    return
 
-    // Animate enter & move
-    nextAtoms.forEach(({ el }) => {
-      const id = el.dataset.kid!
-      const nextRect = nextRectMap.get(id)
-      const prevRect = prevRectMap.get(id)
-      leavingNodes.delete(id)
+  const nextAtoms = collectAtoms(host)
+  const nextRects = measureAtomList(nextAtoms)
+  const matches = matchAtoms(prevAtoms, nextAtoms, prevRects, nextRects)
+  const matchedNext = new Set<number>()
 
-      el.style.willChange = 'transform, opacity'
-      el.style.transition = 'none'
-
-      if (prevRect) {
-        const dx = prevRect.left - nextRect!.left
-        const dy = prevRect.top - nextRect!.top
-        const sx = prevRect.width / (nextRect!.width || 1)
-        const sy = prevRect.height / (nextRect!.height || 1)
-        el.style.transformOrigin = '0 0'
-        el.style.transform = `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`
-      }
-      else {
-        el.style.opacity = '0'
-        el.style.transform = 'scale(0.9)'
-      }
-
-      requestAnimationFrame(() => {
-        el.style.transition = `transform ${props.duration}ms ${props.easing}, opacity ${props.duration}ms ${props.easing}`
-        el.style.transform = ''
-        el.style.opacity = '1'
-      })
-    })
-
-    // Animate leaving atoms using overlay clones
-    if (leavingNodes.size && overlay.value && prevSnapshot && overlayRect) {
-      leavingNodes.forEach((id) => {
-        const rect = prevRectMap.get(id)!
-        const original = prevSnapshot.querySelector<HTMLElement>(`[data-kid="${id}"]`)
-        const clone = original?.cloneNode(true) as HTMLElement | null
-        if (!clone)
-          return
-        clone.style.position = 'absolute'
-        clone.style.left = `${rect.left - overlayRect.left}px`
-        clone.style.top = `${rect.top - overlayRect.top}px`
-        clone.style.transformOrigin = 'center center'
-        clone.style.transition = `transform ${props.duration}ms ${props.easing}, opacity ${props.duration}ms ${props.easing}`
-        clone.style.opacity = '1'
-        clone.style.pointerEvents = 'none'
-        overlay.value!.appendChild(clone)
-        requestAnimationFrame(() => {
-          clone.style.opacity = '0'
-          clone.style.transform = 'scale(0.9) translate(0, 6px)'
-          setTimeout(() => clone.remove(), props.duration + 32)
-        })
-      })
-    }
-
-    hasRendered.value = true
+  matches.forEach(({ prevIndex, nextIndex }) => {
+    const id = prevAtoms[prevIndex].id
+    nextAtoms[nextIndex].id = id
+    nextAtoms[nextIndex].el.dataset.katexMoveId = id
+    leavingIds.delete(id)
+    matchedNext.add(nextIndex)
   })
+
+  nextAtoms.forEach((atom) => {
+    if (!atom.id) {
+      atom.id = nextId()
+      atom.el.dataset.katexMoveId = atom.id
+    }
+  })
+
+  if (prefersReducedMotion() || props.duration <= 0) {
+    hasRendered.value = true
+    return
+  }
+
+  const overlayRect = overlay.value?.getBoundingClientRect()
+
+  matches.forEach(({ prevIndex, nextIndex }, order) => {
+    const atom = nextAtoms[nextIndex]
+    const prevRect = prevRects.get(prevAtoms[prevIndex].id)
+    const nextRect = nextRects[nextIndex]
+
+    if (prevRect && nextRect)
+      animateMatchedAtom(atom, prevRect, nextRect, order)
+  })
+
+  nextAtoms.forEach((atom, index) => {
+    if (!matchedNext.has(index))
+      animateEnteringAtom(atom, index)
+  })
+
+  if (prevSnapshot && overlayRect) {
+    Array.from(leavingIds).forEach((id, index) => {
+      const prevRect = prevRects.get(id)
+      if (prevRect)
+        animateLeavingAtom(id, prevSnapshot, prevRect, overlayRect, index)
+    })
+  }
+
+  hasRendered.value = true
 }
 
-onMounted(() => {
+onMounted(async () => {
   if (container.value)
     renderLatex(container.value, currentLatex.value)
-  nextTick(() => {
-    assignIds([], container.value!)
-    hasRendered.value = true
-  })
+
+  await nextTick()
+
+  if (!container.value)
+    return
+
+  const atoms = collectAtoms(container.value)
+  ensureAtomIds(atoms)
+  hasRendered.value = true
 })
 
-watch(currentLatex, (next) => animate(next))
+watch(currentLatex, next => animate(next))
 </script>
 
 <template>
@@ -254,20 +457,33 @@ watch(currentLatex, (next) => animate(next))
   align-items: center;
   justify-content: center;
   line-height: 1.35;
+  isolation: isolate;
+}
+
+.katex-move__host {
+  position: relative;
+  z-index: 1;
 }
 
 .katex-move__host :deep(.katex) {
   transition: none;
-  will-change: transform;
 }
 
-.katex-move__host :deep([data-kid]) {
+.katex-move__host :deep([data-katex-move-id]) {
   display: inline-block;
+  backface-visibility: hidden;
+  transform-box: border-box;
 }
 
 .katex-move__overlay {
-  position: absolute;
+  position: fixed;
   inset: 0;
+  z-index: 2;
+  overflow: visible;
   pointer-events: none;
+}
+
+.katex-move__overlay :deep([data-katex-move-id]) {
+  display: inline-block;
 }
 </style>
